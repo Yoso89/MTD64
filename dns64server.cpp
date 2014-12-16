@@ -136,7 +136,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 	type=12;
 	type+=(string_length(dns64qry+type));
 	if (dns64qry[type] == 0x00 && dns64qry[type+1] == 0x1c) { 
-		dns64qry[type+1] = 0x01; // Modify TYPE value from 0x001c to 0x0001 which means "A" type
+
 		synth = true;
 		}
 
@@ -194,6 +194,75 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 			break;
 			}
 		}
+
+	// Check RCODE it the record has "AAAA" type
+	if (synth) {
+		// There is no such domain name no need to modify response message (RCODE=3 Name Error)
+		if ((dnsrsp[3] % 0b1000) == 3) synth=false;
+		else {
+			// Check if the response contains Answer. If yes, no need to modify response message
+			if (dnsrsp[6] != 0x0 || dnsrsp[7] != 0x0) {
+				printf("Vanvalasz");
+				synth=false;
+				}
+			// If there is no "AAAA" record then we should synthesize "AAAA" record from "A" recorde therfore we have to send another query
+			}
+		}
+
+	// If there were no answer for the last DNS query
+	if (tmp == confmod.GetResendAttempts()+1) {
+		syslog(LOG_WARNING, "<warning> Ignoring this request since there were no answer from remote DNS server [%s]", question);
+		close(sockfd);
+		if (confmod.GetDebug()) free(question);
+		/* Free the allocated memories */
+		free(dns64qry); free(client_ip); free(dnsrsp); free(dns64rsp);	
+		return;
+		}
+
+
+	if (synth) {
+		dns64qry[type+1] = 0x01;
+		tmp = 0;
+		while (tmp < confmod.GetResendAttempts()+1) {
+		
+			if (confmod.GetDebug()) {
+				if (tmp !=0) syslog(LOG_INFO, "<debuginfo> --> Resending the DNS query [%s]", question);
+				else syslog(LOG_INFO, "<debuginfo> Sending DNS query to remote server [%s]", question);
+				}
+			if ( sendto(sockfd, dns64qry, recv6len, 0, (struct sockaddr *)&dnssrv, sizeof(dnssrv)) == -1) logerror("sendto() failure");
+
+			if ((recvlen = recvfrom(sockfd, dnsrsp, BUFLEN, 0, (struct sockaddr*)&dnssrv, &slen)) <= 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					if (confmod.GetDebug()) syslog(LOG_WARNING, "<debugwarning> No answer from remote DNS server [%s]", question);
+					dnssrv.sin_addr.s_addr = inet_addr(confmod.GetDnsServer());
+					tmp++;
+					}
+				else if (errno == EMSGSIZE) {
+					syslog(LOG_WARNING, "<warning> The response message from IPv4 DNS server is longer than %d bytes. Ignodered [%s]", BUFLEN, question);
+					if (confmod.GetDebug()) free(question);
+					/* Free the allocated memories */
+					free(dns64qry); free(client_ip); free(dnsrsp); free(dns64rsp);	
+					return;
+					}	
+				else logerror("recvfrom() failure");
+				}
+			else {
+				if (confmod.GetDebug()) syslog(LOG_INFO, "<debuginfo> Received DNS response message from remote server [%s]", question);
+				break;
+				}
+			}
+		
+		// If there were no answer for the last DNS query
+		if (tmp == confmod.GetResendAttempts()+1) {
+			syslog(LOG_WARNING, "<warning> Ignoring this request since there were no answer from remote DNS server [%s]", question);
+			close(sockfd);
+			if (confmod.GetDebug()) free(question);
+			/* Free the allocated memories */
+			free(dns64qry); free(client_ip); free(dnsrsp); free(dns64rsp);	
+			return;
+			}
+		}
+		
 
 	// If there were no answer for the last DNS query
 	if (tmp == confmod.GetResendAttempts()+1) {
