@@ -91,7 +91,6 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 
 	unsigned short int answblk;  	// The number of Answer blocks which can be found in the DNS server response message
 	unsigned short int authblk;	// The number of Authority blocks which can be found in the DNS server response message
-	unsigned short int addblk;	// The number of Additional blocks which can be found in the DNS server response message
 	unsigned short int questionblk; // The size of the Question block
 	unsigned short blockcount=0;	// For indexing the processed blocks
 	unsigned plusdata=0;	// The amount of shifts performed (in byte) in the DNS64 response message. It is divisible with 12
@@ -132,11 +131,12 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 		return;
 		}
 
-	/* Check whether the IPv6 client has sent a request which has "AAAA" type (0x001c) */
+	/* Check whether the IPv6 client has sent a request which has "AAAA" type (0x001c). In case of no "AAAA" aswer for that sythesizing "AAAA" could be necessary  */
 	type=12;
 	type+=(string_length(dns64qry+type));
 	if (dns64qry[type] == 0x00 && dns64qry[type+1] == 0x1c) { 
-
+		// This variable indicates whether synthesizing "AAAA" records is necessary. 
+		// It could be changed based on the response message: if the domain has "AAAA" records or the queried domain name does not exist
 		synth = true;
 		}
 
@@ -195,20 +195,6 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 			}
 		}
 
-	// Check RCODE it the record has "AAAA" type
-	if (synth) {
-		// There is no such domain name no need to modify response message (RCODE=3 Name Error)
-		if ((dnsrsp[3] % 0b1000) == 3) synth=false;
-		else {
-			// Check if the response contains Answer. If yes, no need to modify response message
-			if (dnsrsp[6] != 0x0 || dnsrsp[7] != 0x0) {
-				printf("Vanvalasz");
-				synth=false;
-				}
-			// If there is no "AAAA" record then we should synthesize "AAAA" record from "A" recorde therfore we have to send another query
-			}
-		}
-
 	// If there were no answer for the last DNS query
 	if (tmp == confmod.GetResendAttempts()+1) {
 		syslog(LOG_WARNING, "<warning> Ignoring this request since there were no answer from remote DNS server [%s]", question);
@@ -220,7 +206,18 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 		}
 
 
+	/* If query was originally an "AAAA" request we have to check the RCODE value of the response message in order to determine synthesizing "AAAA" is necessary */
 	if (synth) {
+		
+		// If there is no such domain name no need to modify the response message (RCODE=3 Name Error) original message will be sent out to client.
+		if ((dnsrsp[3] % 0b1000) == 3) synth=false;
+
+		// If the response RCODE value is different from 3 and response contains at least one answer no need to modiy response message.
+		else if (dnsrsp[6] != 0x0 || dnsrsp[7] != 0x0) synth=false; 
+
+		// In any other cases synthesizing "AAAA" recrod from "A" is necessary therefore we have to send an "A" query regarding the domain name and convert the results
+		else {
+		
 		dns64qry[type+1] = 0x01;
 		tmp = 0;
 		while (tmp < confmod.GetResendAttempts()+1) {
@@ -262,23 +259,11 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 			return;
 			}
 		}
-		
-
-	// If there were no answer for the last DNS query
-	if (tmp == confmod.GetResendAttempts()+1) {
-		syslog(LOG_WARNING, "<warning> Ignoring this request since there were no answer from remote DNS server [%s]", question);
-		close(sockfd);
-		if (confmod.GetDebug()) free(question);
-		/* Free the allocated memories */
-		free(dns64qry); free(client_ip); free(dnsrsp); free(dns64rsp);	
-		return;
 		}
-		
 
 	close(sockfd);
 
-	/* If it was originally an "AAAA" request MTD64 should synthesize "AAAA" records from "A" */
-	/* It the type of the request is not "AAAA" not necessary to modify response message. We will jump to the sending process */
+	/* If it was originally an "AAAA" request and there were no asnwer for that MTD64 should synthesize "AAAA" records from "A" */
 	if (synth) {
 	
 	memcpy(dns64rsp, dnsrsp, max(confmod.GetResponseMaxLength() , questionblk  ) );  // Copy the response message to dns64rsp which will be edited and sent
@@ -294,11 +279,9 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 	answblk+= dnsrsp[7];
 	authblk = dnsrsp[8] << 8;  // Sets the number of Authority blocks
 	authblk+= dnsrsp[9];
-	addblk  = dnsrsp[10] << 8; // Sets the number of Additional blocks
-	addblk += dnsrsp[11];
 
 	// Examine the blocks in the IPv4 respone message and modify the necessary changes
-	while ( blockcount < answblk+authblk+addblk ) { 
+	while ( blockcount < answblk+authblk ) { 
 
 		/* Check whether addig a new block will cause too big size (more then confmod.GetResponseMaxLenth()) for dns64rsp */
 		// Sets the size of next block
@@ -314,53 +297,24 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 
 			// If there is a cut off, the number of blocks have to be modified accordingly
 			syslog(LOG_WARNING, "<warning> A DNS64 response message has been truncated. The number of the last block is: %d [%s]", blockcount, question);
-			if (confmod.GetDebug()) syslog(LOG_WARNING, "<debugwarning> %d block has been cut off. %d additinal bytes needed for the next block [%s]", answblk+authblk+addblk-blockcount, (plusdata+next+tmp+10+pointer)-confmod.GetResponseMaxLength(), question);
+			if (confmod.GetDebug()) syslog(LOG_WARNING, "<debugwarning> %d block has been cut off. %d additinal bytes needed for the next block [%s]", answblk+authblk-blockcount, (plusdata+next+tmp+10+pointer)-confmod.GetResponseMaxLength(), question);
 
 			// We have to modify the block counters in the Question block
 			if (blockcount < answblk) {
 				dns64rsp[7] = blockcount;	// Answer block counter
 				dns64rsp[9] = 0x00;		// Authority block counter
-				dns64rsp[11]= 0x00;		// Additional block counter
+				// Additional block counter will be set outside the while() cycle
 				}
 			else if (blockcount < answblk+authblk) {
 				dns64rsp[9] = blockcount-answblk;// Authority block counter
-				dns64rsp[11]= 0x00;		 // Additional block counter
-				}
-			else if (blockcount < answblk+authblk+addblk) {
-				dns64rsp[11]= blockcount-answblk-authblk;  // Additional block counter
+				// Additional block counter will be set outside the while() cycle
 				}
 			break;
 			}
 		
 		/* If the new block fits in, continue processing */
+	
 		next+=tmp;  // Adds the length of the actual block's Name field
-		
-		// Additional block could contain poniter in Name field which may need to be modified (Answer and Authority has always c00c therefore shouldn't be changed)
-		if (blockcount >= answblk+authblk) {
-
-			pointer = dnsrsp[next-2];  // Sets the pervious 2 byte's value to variable
-			pointer = pointer << 8;
-			pointer+= dnsrsp[next-1]; 
-			
-			// Check wheter it is a pointer
-			if ( pointer >= 0xc000 ) {
-				tmp=0;
-
-				while (storeindex!=tmp) {
-					if (pointer-0xc000 >= store[tmp]) tmp++;
-					else break;
-					}
-
-				if (type!=0) {
-				
-					if (confmod.GetDebug()) syslog(LOG_INFO, "<debuginfo> Modifying pointer in block %d NAME FIELD %04x to %04x [%s]", blockcount+1, pointer, pointer+tmp*12, question);
-					dns64rsp[plusdata+next-2] = (pointer+tmp*12) >> 8;
-					dns64rsp[plusdata+next-1] = (pointer+tmp*12) % 0x100;
-					}
-				
-				}		
-			}
-
 		type = dnsrsp[next++] << 8;  // Sets the block's Type value
 		type+= dnsrsp[next++];
 
@@ -415,6 +369,8 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 			}	
 		blockcount++;  // One block is completed
 		}
+
+		dns64rsp[11]= 0x00;
 		recvlen = next+plusdata;
 		}
 	
