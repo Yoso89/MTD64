@@ -91,7 +91,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 
 	unsigned short int answblk;  	// The number of Answer blocks which can be found in the DNS server response message
 	unsigned short int authblk;	// The number of Authority blocks which can be found in the DNS server response message
-	unsigned short int addiblk;	// The number of Authority blocks which can be found in the DNS server response message
+	unsigned short int addblk;	// The number of Additional blocks which can be found in the DNS server response message
 	unsigned short int questionblk; // The size of the Question block
 	unsigned short blockcount=0;	// For indexing the processed blocks
 	unsigned plusdata=0;	// The amount of shifts performed (in byte) in the DNS64 response message. It is divisible with 12
@@ -280,11 +280,11 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 	answblk+= dnsrsp[7];
 	authblk = dnsrsp[8] << 8;  // Sets the number of Authority blocks
 	authblk+= dnsrsp[9];
-	addiblk = dnsrsp[10] << 8; // Sets the number of Additional blocks
-	addiblk+= dnsrsp[11];
+	addblk  = dnsrsp[10] << 8; // Sets the number of Additional blocks
+	addblk += dnsrsp[11];
 
 	// Examine the blocks in the IPv4 respone message and modify the necessary changes
-	while ( blockcount < answblk+authblk+addiblk ) { 
+	while ( blockcount < answblk+authblk+addblk ) { 
 
 		/* Check whether addig a new block will cause too big size (more then confmod.GetResponseMaxLenth()) for dns64rsp */
 		// Sets the size of next block
@@ -292,8 +292,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 		pointer = dnsrsp[next+10];	// This is the RDATA length
 		pointer = pointer << 8;
 		pointer+= dnsrsp[next+11];
-		// If the record type is "A" and the record is not an Additinal record then it will be changed to "AAAA" therefore we need 12 bytes additional space
-		if (dnsrsp[next+2] == 0x00 && dnsrsp[next+3]==0x01 && blockcount < answblk+authblk) pointer+=12;  
+		if (dnsrsp[next+2] == 0x00 && dnsrsp[next+3]==0x01) pointer+=12; // If the record type is "A" it will be changed to "AAAA" therefore we need 12 bytes additional space 
 
 		// Sums current length of the dns64rsp (plusdata+next) and the length of this block (tmp(Name field) + 10 (Type,Class,TTL,DLEN) + pointer (RDATA length)
 		// and it will be compared with the size of the IPv6 response message maximum length. If the first is bigger, cut off is necessary.
@@ -301,7 +300,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 
 			// If there is a cut off, the number of blocks have to be modified accordingly
 			syslog(LOG_WARNING, "<warning> A DNS64 response message has been truncated. The number of the last block is: %d [%s]", blockcount, question);
-			if (confmod.GetDebug()) syslog(LOG_WARNING, "<debugwarning> %d block has been cut off. %d additinal bytes needed for the next block [%s]", answblk+authblk+addiblk-blockcount, (plusdata+next+tmp+10+pointer)-confmod.GetResponseMaxLength(), question);
+			if (confmod.GetDebug()) syslog(LOG_WARNING, "<debugwarning> %d block has been cut off. %d additinal bytes needed for the next block [%s]", answblk+authblk+addblk-blockcount, (plusdata+next+tmp+10+pointer)-confmod.GetResponseMaxLength(), question);
 
 			// We have to modify the block counters in the Question block
 			if (blockcount < answblk) {
@@ -313,7 +312,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 				dns64rsp[9] = blockcount-answblk;// Authority block counter
 				dns64rsp[11]= 0x00;		 // Additional block counter
 				}
-			else if (blockcount < answblk+authblk+addiblk) {
+			else if (blockcount < answblk+authblk+addblk) {
 				dns64rsp[11]= blockcount-answblk-authblk;  // Additional block counter
 				}
 			break;
@@ -321,7 +320,7 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 		
 		/* If the new block fits in, continue processing */
 		next+=tmp;  // Adds the length of the actual block's Name field
-
+		
 		// Additional block could contain poniter in Name field which may need to be modified (Answer and Authority has always c00c therefore shouldn't be changed)
 		if (blockcount >= answblk+authblk) {
 
@@ -347,12 +346,12 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 				
 				}		
 			}
-		
+
 		type = dnsrsp[next++] << 8;  // Sets the block's Type value
 		type+= dnsrsp[next++];
 
-		/* Check whether it is an "A" record not from the Additional block. If it is, convert it to an "AAAA" record */
-		if (type == 0x0001 && blockcount < answblk+authblk) {
+		/* Check whether it is an "A" record If it is, convert it to an "AAAA" record */
+		if (type == 0x0001) {
 
 				
 			if (confmod.GetDebug()) syslog(LOG_INFO, "<debuginfo> Found: type \"A\" in block %d, modifying it to \"AAAA\" [%s]", blockcount+1, question);
@@ -401,7 +400,6 @@ void send_response(char *client_ip, int client_port, unsigned char *dns64qry, in
 			
 			}	
 		blockcount++;  // One block is completed
-
 		}
 		recvlen = next+plusdata;
 		}
